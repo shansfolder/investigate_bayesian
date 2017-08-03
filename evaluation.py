@@ -3,12 +3,16 @@ import matplotlib.pyplot as plt
 import time
 import pystan
 import pymc3 as pymc
-import edward
+import edward as ed
+import tensorflow as tf
+from edward.models import Normal, Gamma, StudentT, Empirical
+from edward.models import NormalWithSoftplusScale, GammaWithSoftplusConcentrationRate
+
 from pystan import StanModel
 
 print("pystan version:", pystan.__version__)
 print("pymc version:", pymc.__version__)
-print("edward version:", edward.__version__)
+print("edward version:", ed.__version__)
 
 np.random.seed(42)
 
@@ -126,6 +130,44 @@ def pymc3_vi(xdata, ydata):
     return mean, std
 
 
+def edward_vi(xdata, ydata, num_points):
+    sess = ed.get_session()
+
+    # FORWARD MODEL, Prior
+    mu = StudentT(1.0, [0.0], [1.0])
+    delta = StudentT(1.0, [0.0], [1.0])
+    sigma = Gamma([2.0], [2.0])
+
+    x = Normal(tf.tile(mu + delta, [num_points]), tf.tile(sigma, [num_points]))
+    y = Normal(tf.tile(mu, [num_points]), tf.tile(sigma, [num_points]))
+
+    '''
+    Mean and delta are best approximated by the NormalWithSoftplusScale distribution
+    with the softplus function on the scale (sigma)(variance should be positive) parameter 
+    since Cauchy and Normal are both defined on positive and negative scales.
+    Sigma as a variance should be always positive: 
+    we approximate sigma with GammaWithSoftplusConcentrationRate distribution 
+    ensuring the positive concentration and rate parameters.
+    '''
+    # BACKWARD MODEL
+    q_mu = NormalWithSoftplusScale(loc=tf.Variable([0.0]), scale=tf.Variable([1.0]))
+    q_sigma = GammaWithSoftplusConcentrationRate(tf.nn.softplus(tf.Variable([1.0])), tf.nn.softplus(tf.Variable([1.0])))
+    q_delta = NormalWithSoftplusScale(loc=tf.Variable([0.0]), scale=tf.Variable([1.0]))
+
+    # INFERENCE
+    inference = ed.KLqp({delta: q_delta, mu: q_mu, sigma: q_sigma}, data={x: xdata, y: ydata})
+    inference.run(n_iter=20000, n_print=200, n_samples=10)
+
+    T = 10000
+    q_delta_sample = sess.run(q_delta.sample(sample_shape=T))
+
+    mean = q_delta_sample.mean()
+    std = q_delta_sample.std()
+    return mean, std
+
+
+
+
 def encodeDataKey(num_points, alpha, sigma, mu):
     key = str(num_points) + "," + str(alpha) + "," + str(sigma) + "," + str(mu)
     return key
@@ -174,8 +216,6 @@ for num_points in all_num_points:
             (xdata, ydata) = data_dict[data_key]
             result_dict['true delta'] = xdata.mean() - ydata.mean()
 
-            #TODO: why is true delta being modified????
-
             '''
             stan_mc_mean, stan_mc_std = pystan_mcmc(xdata, ydata, num_points)
             stan_vi_mean, stan_vi_std = pystan_vi(xdata, ydata, num_points)
@@ -184,7 +224,7 @@ for num_points in all_num_points:
             result_dict['delta_stan_mc_std'] = stan_mc_std
             result_dict['delta_stan_vi_mean'] = stan_vi_mean
             result_dict['delta_stan_vi_std'] = stan_vi_std
-            '''
+            
             
             pymc3_mc_mean, pymc3_mc_std = pymc3_mcmc(xdata, ydata)
             pymc3_vi_mean, pymc3_vi_std = pymc3_vi(xdata, ydata)
@@ -193,6 +233,11 @@ for num_points in all_num_points:
             result_dict['delta_pymc3_mc_std'] = pymc3_mc_std
             result_dict['delta_pymc3_vi_mean'] = pymc3_vi_mean
             result_dict['delta_pymc3_vi_std'] = pymc3_vi_std
+            '''
+
+            edward_vi_mean, edward_vi_std = edward_vi(xdata, ydata, num_points)
+            result_dict['delta_edward_vi_mean'] = edward_vi_mean
+            result_dict['delta_edward_vi_std'] = edward_vi_std
 
             result.append(result_dict)
 
