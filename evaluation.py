@@ -90,7 +90,68 @@ def pystan_vi(xdata, ydata, num_points):
     return mean, std
 
 
+def pymc3_mcmc(xdata, ydata):
+    with pymc.Model() as model:
+        alpha = pymc.Cauchy('alpha', 0, 1)
+        mu = pymc.Cauchy('mu', 0, 1)
+        sigma = pymc.Gamma('sigma', 2, 2)
+        delta = pymc.Deterministic('delta', alpha * sigma)
+        x = pymc.Normal('x', mu=mu+delta, sd=sigma, observed=xdata)
+        y = pymc.Normal('y', mu=mu, sd=sigma, observed=ydata)
+
+        # run the basic MCMC: we'll do 25000 iterations to match PyStan above
+        trace = pymc.sample(25000, tune=500)
+        pymc_trace = trace['delta']
+
+        mean = pymc_trace.mean()
+        std = pymc_trace.std()
+    return mean, std
+
+
+def pymc3_vi(xdata, ydata):
+    with pymc.Model() as model:
+        alpha = pymc.Cauchy('alpha', 0, 1)
+        mu = pymc.Cauchy('mu', 0, 1)
+        sigma = pymc.Gamma('sigma', 2, 2)
+        delta = pymc.Deterministic('delta', alpha * sigma)
+        x = pymc.Normal('x', mu=mu+delta, sd=sigma, observed=xdata)
+        y = pymc.Normal('y', mu=mu, sd=sigma, observed=ydata)
+
+        mean_field = pymc.fit(method='advi', n=10000)
+        trace = mean_field.sample(25000)
+        pymc_trace = trace['delta']
+
+        mean = pymc_trace.mean()
+        std = pymc_trace.std()
+    return mean, std
+
+
+def encodeDataKey(num_points, alpha, sigma, mu):
+    key = str(num_points) + "," + str(alpha) + "," + str(sigma) + "," + str(mu)
+    return key
+
+
+
 start_time = time.time()
+
+data_dict = {}
+for num_points in all_num_points:
+    for alpha in all_alphas:
+        for sigma in all_sigmas:
+            print("#data", num_points)
+            print("alpha", alpha)
+            print("delta", alpha * sigma)
+            print("sigma", sigma)
+            print("mu", mu)
+            print("---------------------------")
+            xdata, ydata = generate_data_normal(alpha, mu, sigma, num_points)
+            data_key = encodeDataKey(num_points, alpha, sigma, mu)
+            data_dict[data_key] = (xdata, ydata)
+
+
+
+
+
 
 result = []
 for num_points in all_num_points:
@@ -109,9 +170,13 @@ for num_points in all_num_points:
             result_dict['sigma'] = sigma
             result_dict['mu'] = mu
 
-            xdata, ydata = generate_data_normal(alpha, mu, sigma, num_points)
+            data_key = encodeDataKey(num_points, alpha, sigma, mu)
+            (xdata, ydata) = data_dict[data_key]
             result_dict['true delta'] = xdata.mean() - ydata.mean()
 
+            #TODO: why is true delta being modified????
+
+            '''
             stan_mc_mean, stan_mc_std = pystan_mcmc(xdata, ydata, num_points)
             stan_vi_mean, stan_vi_std = pystan_vi(xdata, ydata, num_points)
 
@@ -119,6 +184,15 @@ for num_points in all_num_points:
             result_dict['delta_stan_mc_std'] = stan_mc_std
             result_dict['delta_stan_vi_mean'] = stan_vi_mean
             result_dict['delta_stan_vi_std'] = stan_vi_std
+            '''
+            
+            pymc3_mc_mean, pymc3_mc_std = pymc3_mcmc(xdata, ydata)
+            pymc3_vi_mean, pymc3_vi_std = pymc3_vi(xdata, ydata)
+
+            result_dict['delta_pymc3_mc_mean'] = pymc3_mc_mean
+            result_dict['delta_pymc3_mc_std'] = pymc3_mc_std
+            result_dict['delta_pymc3_vi_mean'] = pymc3_vi_mean
+            result_dict['delta_pymc3_vi_std'] = pymc3_vi_std
 
             result.append(result_dict)
 
