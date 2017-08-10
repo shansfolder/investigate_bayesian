@@ -1,13 +1,15 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+
+import pandas as pd
 import pystan
 import pymc3 as pymc
 import edward as ed
 import tensorflow as tf
 from edward.models import Normal, Gamma, StudentT, Empirical
 from edward.models import NormalWithSoftplusScale, GammaWithSoftplusConcentrationRate
-
+import os
 from pystan import StanModel
 
 print("pystan version:", pystan.__version__)
@@ -25,9 +27,10 @@ mu = 0
 # Create the Stan model
 fit_code = """
 data {
-	int<lower=0> N; 	// number of entities
-	real y[N]; 		// normally distributed KPI in the control group
-	real x[N]; 		// normally distributed KPI in the treatment group
+	int<lower=0> Ny; 	// number of entities in the control group
+	int<lower=0> Nx; 	// number of entities in the treatment group
+	real y[Ny]; 		// normally distributed KPI in the control group
+	real x[Nx]; 		// normally distributed KPI in the treatment group
 }
 
 parameters {
@@ -49,8 +52,16 @@ model {
 	y ~ normal(mu, sigma);
 }
 """
+
 stan_model = StanModel(model_code=fit_code)
 
+def read_csv(f_csv):
+    if os.path.isfile(f_csv):
+        with open(f_csv, 'r') as f_data:
+            bq_df = pd.read_csv(f_data)
+            return bq_df
+    else:
+        print('Data does not exist!')
 
 def generate_data_normal(alpha, mu, sigma, N):
     delta = alpha * sigma
@@ -73,8 +84,8 @@ def plot_trace_hist(trace):
     plt.show()
 
 
-def pystan_mcmc(xdata, ydata, num_points):
-    fit_data = {'N': num_points, 'x': xdata, 'y': ydata}
+def pystan_mcmc(xdata, ydata, nx, ny):
+    fit_data = {'Ny': ny, 'Nx': nx, 'x': xdata, 'y': ydata}
     fit = stan_model.sampling(data=fit_data, iter=25000, chains=4, n_jobs=1, seed=1,
                       control={'stepsize': 0.01, 'adapt_delta': 0.99})
     # extract the traces
@@ -85,8 +96,8 @@ def pystan_mcmc(xdata, ydata, num_points):
     return mean, std
 
 
-def pystan_vi(xdata, ydata, num_points):
-    fit_data = {'N': num_points, 'x': xdata, 'y': ydata}
+def pystan_vi(xdata, ydata, nx, ny):
+    fit_data = {'Ny': ny, 'Nx': nx, 'x': xdata, 'y': ydata}
     results = stan_model.vb(data=fit_data, iter=10000)
     pystan_vi_trace = np.array(results['sampler_params'][3])
     mean = pystan_vi_trace.mean()
@@ -130,7 +141,7 @@ def pymc3_vi(xdata, ydata):
     return mean, std
 
 
-def edward_vi(xdata, ydata, num_points):
+def edward_vi(xdata, ydata, nx, ny):
     sess = ed.get_session()
 
     # FORWARD MODEL, Prior
@@ -138,8 +149,8 @@ def edward_vi(xdata, ydata, num_points):
     delta = StudentT(1.0, [0.0], [1.0])
     sigma = Gamma([2.0], [2.0])
 
-    x = Normal(tf.tile(mu + delta, [num_points]), tf.tile(sigma, [num_points]))
-    y = Normal(tf.tile(mu, [num_points]), tf.tile(sigma, [num_points]))
+    x = Normal(tf.tile(mu + delta, [nx]), tf.tile(sigma, [nx]))
+    y = Normal(tf.tile(mu, [ny]), tf.tile(sigma, [ny]))
 
     '''
     Mean and delta are best approximated by the NormalWithSoftplusScale distribution
@@ -166,14 +177,41 @@ def edward_vi(xdata, ydata, num_points):
     return mean, std
 
 
-
-
 def encodeDataKey(num_points, alpha, sigma, mu):
     key = str(num_points) + "," + str(alpha) + "," + str(sigma) + "," + str(mu)
     return key
 
 
+def addDerivedKPIColumn(dataframe, derived_kpi_name, numerator_column, denominator_column):
+    ctrl_reference_kpis = dataframe.loc[dataframe.variant == 'Control', denominator_column]
+    treat_reference_kpis = dataframe.loc[dataframe.variant == 'Treatment', denominator_column]
 
+    n_nan_ref_ctrl = sum(ctrl_reference_kpis == 0) + np.isnan(ctrl_reference_kpis).sum()
+    n_non_nan_ref_ctrl = len(ctrl_reference_kpis) - n_nan_ref_ctrl
+
+    n_nan_ref_treat = sum(treat_reference_kpis == 0) + np.isnan(treat_reference_kpis).sum()
+    n_non_nan_ref_treat = len(treat_reference_kpis) - n_nan_ref_treat
+
+    ctrl_weights = n_non_nan_ref_ctrl * ctrl_reference_kpis / np.nansum(ctrl_reference_kpis)
+    treat_weights = n_non_nan_ref_treat * treat_reference_kpis / np.nansum(treat_reference_kpis)
+
+    newColumn = {derived_kpi_name: dataframe[numerator_column] / dataframe[denominator_column]}
+    dataframe = dataframe.assign(**newColumn)
+    dataframe.loc[dataframe.variant == 'Control', derived_kpi_name] *= ctrl_weights
+    dataframe.loc[dataframe.variant == 'Treatment', derived_kpi_name] *= treat_weights
+
+    n_nan = np.isnan(dataframe[derived_kpi_name]).sum()
+    nan_percentage_str = "%.4f" % (n_nan / len(dataframe))
+    msg = derived_kpi_name + ": " + str(n_nan) + " out of " + str(len(dataframe)) + \
+          " is nan. Percentage:" + nan_percentage_str
+    print(msg)
+    return dataframe
+
+
+
+
+# simulation
+'''
 start_time = time.time()
 
 data_dict = {}
@@ -189,11 +227,6 @@ for num_points in all_num_points:
             xdata, ydata = generate_data_normal(alpha, mu, sigma, num_points)
             data_key = encodeDataKey(num_points, alpha, sigma, mu)
             data_dict[data_key] = (xdata, ydata)
-
-
-
-
-
 
 result = []
 for num_points in all_num_points:
@@ -216,9 +249,9 @@ for num_points in all_num_points:
             (xdata, ydata) = data_dict[data_key]
             result_dict['true delta'] = xdata.mean() - ydata.mean()
 
-            '''
-            stan_mc_mean, stan_mc_std = pystan_mcmc(xdata, ydata, num_points)
-            stan_vi_mean, stan_vi_std = pystan_vi(xdata, ydata, num_points)
+            
+            stan_mc_mean, stan_mc_std = pystan_mcmc(xdata, ydata, num_points, num_points)
+            stan_vi_mean, stan_vi_std = pystan_vi(xdata, ydata, num_points, num_points)
 
             result_dict['delta_stan_mc_mean'] = stan_mc_mean
             result_dict['delta_stan_mc_std'] = stan_mc_std
@@ -233,9 +266,9 @@ for num_points in all_num_points:
             result_dict['delta_pymc3_mc_std'] = pymc3_mc_std
             result_dict['delta_pymc3_vi_mean'] = pymc3_vi_mean
             result_dict['delta_pymc3_vi_std'] = pymc3_vi_std
-            '''
+            
 
-            edward_vi_mean, edward_vi_std = edward_vi(xdata, ydata, num_points)
+            edward_vi_mean, edward_vi_std = edward_vi(xdata, ydata, num_points, num_points)
             result_dict['delta_edward_vi_mean'] = edward_vi_mean
             result_dict['delta_edward_vi_std'] = edward_vi_std
 
@@ -243,6 +276,40 @@ for num_points in all_num_points:
 
 end_time = time.time()
 print("--- total time %s seconds ---" % (end_time - start_time))
-
-
 print(result)
+'''
+
+# real
+start_time = time.time()
+
+real_data = read_csv("segmented_sorting_fasion_floor_fashion_processed.csv")
+real_data = addDerivedKPIColumn(real_data, "CTR", "orders", "sessions")
+xdata = real_data.loc[real_data.variant == 'Control', 'CTR'].as_matrix()
+ydata = real_data.loc[real_data.variant == 'Treatment', 'CTR'].as_matrix()
+
+print("num of xdata", len(xdata))
+print("num of ydata", len(ydata))
+
+result_dict = {'true delta': xdata.mean() - ydata.mean()}
+
+# stan_mc_mean, stan_mc_std = pystan_mcmc(xdata, ydata, len(xdata), len(ydata))
+# stan_vi_mean, stan_vi_std = pystan_vi(xdata, ydata, len(xdata), len(ydata))
+# result_dict['delta_stan_mc_mean'] = stan_mc_mean
+# result_dict['delta_stan_mc_std'] = stan_mc_std
+# result_dict['delta_stan_vi_mean'] = stan_vi_mean
+# result_dict['delta_stan_vi_std'] = stan_vi_std
+
+# pymc3_mc_mean, pymc3_mc_std = pymc3_mcmc(xdata, ydata)
+# pymc3_vi_mean, pymc3_vi_std = pymc3_vi(xdata, ydata)
+# result_dict['delta_pymc3_mc_mean'] = pymc3_mc_mean
+# result_dict['delta_pymc3_mc_std'] = pymc3_mc_std
+# result_dict['delta_pymc3_vi_mean'] = pymc3_vi_mean
+# result_dict['delta_pymc3_vi_std'] = pymc3_vi_std
+
+edward_vi_mean, edward_vi_std = edward_vi(xdata, ydata, len(xdata), len(ydata))
+result_dict['delta_edward_vi_mean'] = edward_vi_mean
+result_dict['delta_edward_vi_std'] = edward_vi_std
+
+end_time = time.time()
+print("--- total time %s seconds ---" % (end_time - start_time))
+print(result_dict)
