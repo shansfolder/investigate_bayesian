@@ -99,6 +99,8 @@ def pystan_mcmc(xdata, ydata, nx, ny):
 def pystan_vi(xdata, ydata, nx, ny):
     fit_data = {'Ny': ny, 'Nx': nx, 'x': xdata, 'y': ydata}
     results = stan_model.vb(data=fit_data, iter=10000)
+    print(results)
+    
     pystan_vi_trace = np.array(results['sampler_params'][3])
     mean = pystan_vi_trace.mean()
     std = pystan_vi_trace.std()
@@ -293,7 +295,7 @@ print("num of ydata", len(ydata))
 result_dict = {'true delta': xdata.mean() - ydata.mean()}
 
 # stan_mc_mean, stan_mc_std = pystan_mcmc(xdata, ydata, len(xdata), len(ydata))
-# stan_vi_mean, stan_vi_std = pystan_vi(xdata, ydata, len(xdata), len(ydata))
+stan_vi_mean, stan_vi_std = pystan_vi(xdata, ydata, len(xdata), len(ydata))
 # result_dict['delta_stan_mc_mean'] = stan_mc_mean
 # result_dict['delta_stan_mc_std'] = stan_mc_std
 # result_dict['delta_stan_vi_mean'] = stan_vi_mean
@@ -306,9 +308,9 @@ result_dict = {'true delta': xdata.mean() - ydata.mean()}
 # result_dict['delta_pymc3_vi_mean'] = pymc3_vi_mean
 # result_dict['delta_pymc3_vi_std'] = pymc3_vi_std
 
-edward_vi_mean, edward_vi_std = edward_vi(xdata, ydata, len(xdata), len(ydata))
-result_dict['delta_edward_vi_mean'] = edward_vi_mean
-result_dict['delta_edward_vi_std'] = edward_vi_std
+# edward_vi_mean, edward_vi_std = edward_vi(xdata, ydata, len(xdata), len(ydata))
+# result_dict['delta_edward_vi_mean'] = edward_vi_mean
+# result_dict['delta_edward_vi_std'] = edward_vi_std
 
 end_time = time.time()
 print("--- total time %s seconds ---" % (end_time - start_time))
